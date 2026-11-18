@@ -8,7 +8,7 @@ Required environment variables:
     SEPOLIA_RPC_URL       - QuickNode (or other) Sepolia RPC endpoint
     FAUCET_PRIVATE_KEY    - private key of the funded faucet wallet
                              (NEVER commit this. Use Railway/Render secrets.)
-    GFLO_TOKEN_ADDRESS    - defaults to the known deployed GFLOToken address
+    GFLO_TOKEN_ADDRESS    - canonical fixed-supply token; no default, retired v3 addresses refused
     FAUCET_CLAIM_AMOUNT   - GFLO tokens per claim (default: 100)
     FAUCET_COOLDOWN_HOURS - hours between claims per wallet (default: 24)
 
@@ -33,15 +33,17 @@ from flask import Blueprint, request, jsonify
 from web3 import Web3
 from eth_account import Account
 
+from gflo_config import canonical_address
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
 
 RPC_URL = os.environ.get("SEPOLIA_RPC_URL")
 PRIVATE_KEY = os.environ.get("FAUCET_PRIVATE_KEY")
-GFLO_TOKEN_ADDRESS = os.environ.get(
-    "GFLO_TOKEN_ADDRESS", "0x563b2e3b499818a2f84c472efb3169a2667807fe"
-)
+# No default: the old MockGFLOToken (0x563b2e…) is a retired v3 contract with an
+# open faucet() mint. Unset or deprecated => DRY-RUN, no transfers are sent.
+GFLO_TOKEN_ADDRESS = canonical_address("GFLO_TOKEN_ADDRESS")
 CLAIM_AMOUNT = int(os.environ.get("FAUCET_CLAIM_AMOUNT", "100"))
 COOLDOWN_HOURS = int(os.environ.get("FAUCET_COOLDOWN_HOURS", "24"))
 
@@ -82,15 +84,15 @@ w3 = None
 token_contract = None
 faucet_account = None
 
-if RPC_URL and PRIVATE_KEY:
+if RPC_URL and PRIVATE_KEY and GFLO_TOKEN_ADDRESS:
     w3 = Web3(Web3.HTTPProvider(RPC_URL))
     faucet_account = Account.from_key(PRIVATE_KEY)
     token_contract = w3.eth.contract(
-        address=Web3.to_checksum_address(GFLO_TOKEN_ADDRESS), abi=ERC20_TRANSFER_ABI
+        address=GFLO_TOKEN_ADDRESS, abi=ERC20_TRANSFER_ABI
     )
 else:
     logger.warning(
-        "SEPOLIA_RPC_URL / FAUCET_PRIVATE_KEY missing — faucet running in DRY-RUN mode."
+        "SEPOLIA_RPC_URL / FAUCET_PRIVATE_KEY / canonical GFLO_TOKEN_ADDRESS missing — faucet running in DRY-RUN mode."
     )
 
 # ---------------------------------------------------------------------------

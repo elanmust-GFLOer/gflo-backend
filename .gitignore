@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+faucet_claims.json
+faucet_events.jsonl
+.env
