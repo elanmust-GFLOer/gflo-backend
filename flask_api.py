@@ -7,6 +7,8 @@ from dotenv import load_dotenv
 
 load_dotenv(os.path.expanduser("~/.env"))
 
+from gflo_config import canonical_address  # noqa: E402  (needs env loaded first)
+
 app = Flask(__name__)
 CORS(app)
 
@@ -22,103 +24,86 @@ except ImportError:
 RPC_URL = os.getenv("SEPOLIA_RPC_URL", "https://sepolia.drpc.org")
 w3 = Web3(Web3.HTTPProvider(RPC_URL))
 
-# Contract Addresses
-# NOTE: GFLOGNITION_ADDRESS eltávolítva — bytecode-szinten bizonyított, hogy
-# ez a cím a PIECore egy redundáns/árva duplikátuma, NEM egy külön GFLOIgnition
-# kontraktus. Nincs semmi hívható rajta, amit a PIECore ne tudna.
-PIECORE_ADDRESS = os.getenv("PIECORE_ADDRESS", "0x9CF55d0b9D61Dc28EF3cb10765CF4b861Cd0991e")
-GASFEELOOP_ADDRESS = os.getenv("GASFEELOOP_ADDRESS", "0xd2C926F67080D6315b5dbBc7D621d729Cfe8A9C7")
+# ── Canonical PIE v0.2 read path (fail-closed) ────────────────
+# A visszavont Sepolia v3 szerződéseket (PIECore 0x9CF55d…, GasFeeLoop 0xd2C926…)
+# a backend NEM olvassa: ott az XP bárki által önkiosztható, a GasFeeLoop pedig
+# plutokratikus. Nincs alapértelmezett cím. Amíg a v0.2 nincs nyilvános hálózaton
+# deployolva és a három env var be nincs állítva, minden XP/tier végpont 503-at ad,
+# és a tier_required kapu MINDEN kérést elutasít.
+#   PIE_CORE_ADDRESS        PIECoreIgnitionV01  getIdentity()
+#   XP_REGISTRY_ADDRESS     TrustedXPSourceRegistryV02  totalXP()
+#   EFFECTIVE_TIER_GATE_ADDRESS  EffectiveTierGateV01  effectiveTier()
+PIE_CORE_ADDRESS = canonical_address("PIE_CORE_ADDRESS")
+XP_REGISTRY_ADDRESS = canonical_address("XP_REGISTRY_ADDRESS")
+EFFECTIVE_TIER_GATE_ADDRESS = canonical_address("EFFECTIVE_TIER_GATE_ADDRESS")
 
-# ── PIECore ABI — a TÉNYLEGESEN DEPLOYOLT kontraktushoz igazítva ──
-# Ez az ABI 14/14 function selectorban bizonyítottan egyezik a Sepolia-n
-# élő 0x9CF55d... bytecode-dal (lásd: gflo-pie/contracts/PIECore.sol).
-# NINCS getIdentity()/isEligibleForUpgrade()/getPath() a láncon — ezeket
-# lentebb Pythonban számoljuk ki az identities()/getXP()/getTier() alapján.
-PIECORE_ABI = [
-    {"inputs": [{"name": "user", "type": "address"}], "name": "getXP", "outputs": [{"name": "", "type": "uint256"}], "stateMutability": "view", "type": "function"},
-    {"inputs": [{"name": "user", "type": "address"}], "name": "getTier", "outputs": [{"name": "", "type": "uint8"}], "stateMutability": "view", "type": "function"},
-    {"inputs": [{"name": "", "type": "address"}], "name": "identities", "outputs": [
-        {"name": "xp", "type": "uint256"}, {"name": "path", "type": "uint8"}, {"name": "tier", "type": "uint8"}
-    ], "stateMutability": "view", "type": "function"},
-    {"inputs": [], "name": "SOVEREIGN_TIER1_XP", "outputs": [{"name": "", "type": "uint256"}], "stateMutability": "view", "type": "function"},
-    {"inputs": [], "name": "REFORMER_BURN_AMOUNT", "outputs": [{"name": "", "type": "uint256"}], "stateMutability": "view", "type": "function"},
-]
+PIE_CORE_ABI = [{
+    "inputs": [{"name": "account", "type": "address"}], "name": "getIdentity",
+    "outputs": [{"components": [
+        {"name": "exists", "type": "bool"}, {"name": "xp", "type": "uint64"},
+        {"name": "selectedPath", "type": "uint8"}, {"name": "tier", "type": "uint8"}],
+        "name": "", "type": "tuple"}],
+    "stateMutability": "view", "type": "function"}]
+XP_REGISTRY_ABI = [{
+    "inputs": [{"name": "user", "type": "address"}], "name": "totalXP",
+    "outputs": [{"name": "", "type": "uint64"}], "stateMutability": "view", "type": "function"}]
+TIER_GATE_ABI = [{
+    "inputs": [{"name": "wallet", "type": "address"}], "name": "effectiveTier",
+    "outputs": [{"name": "", "type": "uint8"}], "stateMutability": "view", "type": "function"}]
 
-# GasFeeLoop ABI (ez a kontraktus bytecode-szinten megerősítve rendben van, változatlan)
-GASFEELOOP_ABI = [
-    {"inputs": [{"name": "user", "type": "address"}], "name": "getStake", "outputs": [{"name": "", "type": "uint256"}], "stateMutability": "view", "type": "function"},
-    {"inputs": [{"name": "user", "type": "address"}], "name": "getAccumulatedXP", "outputs": [{"name": "", "type": "uint256"}], "stateMutability": "view", "type": "function"},
-    {"inputs": [{"name": "user", "type": "address"}], "name": "getMultiplier", "outputs": [{"name": "", "type": "uint256"}], "stateMutability": "view", "type": "function"},
-    {"inputs": [{"name": "user", "type": "address"}], "name": "getUserInfo", "outputs": [
-        {"name": "stakeAmount", "type": "uint256"}, {"name": "multiplier", "type": "uint256"},
-        {"name": "accumulatedXP", "type": "uint256"}, {"name": "currentEpochXP", "type": "uint256"},
-        {"name": "remainingEpochXP", "type": "uint256"}
-    ], "stateMutability": "view", "type": "function"},
-]
+REPUTATION_ENABLED = all((PIE_CORE_ADDRESS, XP_REGISTRY_ADDRESS, EFFECTIVE_TIER_GATE_ADDRESS))
+if REPUTATION_ENABLED:
+    pie = w3.eth.contract(address=PIE_CORE_ADDRESS, abi=PIE_CORE_ABI)
+    xp_registry = w3.eth.contract(address=XP_REGISTRY_ADDRESS, abi=XP_REGISTRY_ABI)
+    tier_gate = w3.eth.contract(address=EFFECTIVE_TIER_GATE_ADDRESS, abi=TIER_GATE_ABI)
+else:
+    pie = xp_registry = tier_gate = None
 
 PATH_NAMES = {0: 'None', 1: 'Sovereign', 2: 'Reformer', 3: 'Praxis'}
+UNAVAILABLE = {
+    'error': 'canonical_source_unavailable',
+    'detail': 'No canonical PIE v0.2 deployment is configured. Legacy v3 XP is self-mintable '
+              'and is not served as reputation.',
+}
 
-# A Praxis-küszöbök a szerződésben hardcode-olva vannak (nincs public getterük),
-# ezért itt is hardcode-oljuk — ha a szerződés valaha frissül, ezt is frissíteni kell.
-PRAXIS_XP_REQUIRED = 5000
-PRAXIS_BURN_AMOUNT_WEI = 10000 * 10**18
 
-pie = w3.eth.contract(address=Web3.to_checksum_address(PIECORE_ADDRESS), abi=PIECORE_ABI)
-gas = w3.eth.contract(address=Web3.to_checksum_address(GASFEELOOP_ADDRESS), abi=GASFEELOOP_ABI)
+class ReputationUnavailable(Exception):
+    pass
 
 
 def compute_identity(addr):
-    """
-    A valódi, deployolt PIECore-on NINCS getIdentity()/isEligibleForUpgrade().
-    Ezt itt szimuláljuk: 1 db identities() hívásból (xp, path, tier) kiszámoljuk
-    ugyanazt, amit egy 'v2' kontraktus getIdentity()-je adna, plusz az
-    upgrade-jogosultságot a szerződés require()-jeivel megegyező logikával.
-    """
-    xp, path, tier = pie.functions.identities(addr).call()
-    sovereign_tier1_xp = pie.functions.SOVEREIGN_TIER1_XP().call()
-
-    eligible = False
-    next_threshold = None
-    next_action = None
-
-    if path == 1:  # Sovereign -> Reformer
-        eligible = xp >= sovereign_tier1_xp
-        next_threshold = sovereign_tier1_xp
-        next_action = "upgradeToReformer"
-    elif path == 2:  # Reformer -> Praxis
-        eligible = xp >= PRAXIS_XP_REQUIRED
-        next_threshold = PRAXIS_XP_REQUIRED
-        next_action = "upgradeToPraxis"
-    elif path == 3:  # Praxis — jelenleg nincs magasabb szint
-        eligible = False
-        next_threshold = None
-        next_action = None
-
+    """Canonical identity: attested XP via the Registry, privilege via EffectiveTierGate."""
+    if not REPUTATION_ENABLED:
+        raise ReputationUnavailable()
+    exists, _base_xp, selected_path, achieved_tier = pie.functions.getIdentity(addr).call()
+    if not exists:
+        return {'exists': False, 'xp': 0, 'path': 'None', 'achievedTier': 0, 'effectiveTier': 0}
     return {
-        'xp': xp,
-        'path': PATH_NAMES.get(path, 'Unknown'),
-        'tier': tier,
-        'eligibleForUpgrade': eligible,
-        'nextThreshold': next_threshold,
-        'nextAction': next_action,
+        'exists': True,
+        'xp': xp_registry.functions.totalXP(addr).call(),
+        'path': PATH_NAMES.get(selected_path, 'Unknown'),
+        'achievedTier': achieved_tier,   # historical only, never a privilege
+        'effectiveTier': tier_gate.functions.effectiveTier(addr).call(),
     }
 
 
-# ── TIER MIDDLEWARE ─────────────────────────────────────────
+# ── TIER MIDDLEWARE (fail-closed) ─────────────────────────────
 def tier_required(min_tier):
     def decorator(f):
         @wraps(f)
         def decorated(*args, **kwargs):
-            wallet = request.headers.get('X-Wallet-Address') or (request.json or {}).get('address', '')
+            if not REPUTATION_ENABLED:
+                return jsonify(UNAVAILABLE), 503
+            wallet = request.headers.get('X-Wallet-Address') or (request.get_json(silent=True) or {}).get('address', '')
             if not wallet:
                 return jsonify({'error': 'Wallet address required'}), 401
             try:
                 addr = Web3.to_checksum_address(wallet)
-                user_tier = pie.functions.getTier(addr).call()
-                if user_tier < min_tier:
-                    return jsonify({'error': f'Tier {min_tier} required. You are Tier {user_tier}.'}), 403
-            except Exception as e:
-                return jsonify({'error': f'Identity check failed: {str(e)}'}), 400
+                user_tier = tier_gate.functions.effectiveTier(addr).call()
+            except Exception:
+                return jsonify({'error': 'Identity check failed'}), 503
+            if user_tier < min_tier:
+                return jsonify({'error': f'Tier {min_tier} required. Effective tier: {user_tier}.'}), 403
             return f(*args, **kwargs)
         return decorated
     return decorator
@@ -136,7 +121,12 @@ def status():
         'status': 'operational',
         'blockchain': 'connected' if w3.is_connected() else 'disconnected',
         'network': 'sepolia',
-        'contracts': {'PIECore': PIECORE_ADDRESS, 'GasFeeLoop': GASFEELOOP_ADDRESS}
+        'reputation': 'enabled' if REPUTATION_ENABLED else 'disabled',
+        'contracts': {
+            'PIECore': PIE_CORE_ADDRESS,
+            'XPRegistry': XP_REGISTRY_ADDRESS,
+            'EffectiveTierGate': EFFECTIVE_TIER_GATE_ADDRESS,
+        },
     })
 
 @app.route('/api/health')
@@ -151,22 +141,14 @@ def health():
 def get_identity(address):
     try:
         addr = Web3.to_checksum_address(address)
-        identity = compute_identity(addr)
-        stake_info = gas.functions.getUserInfo(addr).call()
-
-        return jsonify({
-            'address': address,
-            'piecore': identity,
-            'gasfeeloop': {
-                'stakeAmount': stake_info[0] / 1e18,
-                'multiplier': stake_info[1] / 1e18,
-                'accumulatedXP': stake_info[2] / 1e18,
-                'currentEpochXP': stake_info[3] / 1e18,
-                'remainingEpochXP': stake_info[4] / 1e18,
-            }
-        })
-    except Exception as e:
-        return jsonify({'error': str(e)}), 400
+    except Exception:
+        return jsonify({'error': 'Invalid address'}), 400
+    try:
+        return jsonify({'address': addr, 'piecore': compute_identity(addr)})
+    except ReputationUnavailable:
+        return jsonify(UNAVAILABLE), 503
+    except Exception:
+        return jsonify({'error': 'Chain read failed'}), 503
 
 @app.route('/api/paths')
 def paths_info():
@@ -189,16 +171,16 @@ def paths_info():
 
 @app.route('/api/ai/chat', methods=['POST'])
 def ai_chat():
-    data = request.json
+    data = request.get_json(silent=True) or {}
     message = data.get('message', '')
     address = data.get('address', '')
 
     context = ""
-    if address:
+    if address and REPUTATION_ENABLED:
         try:
-            addr = Web3.to_checksum_address(address)
-            identity = compute_identity(addr)
-            context = f"\nUser: XP={identity['xp']}, Tier={identity['tier']}, Path={identity['path']}"
+            identity = compute_identity(Web3.to_checksum_address(address))
+            context = (f"\nUser: XP={identity['xp']}, EffectiveTier={identity['effectiveTier']}, "
+                       f"Path={identity['path']}")
         except Exception:
             pass
 
@@ -219,23 +201,20 @@ def ai_chat():
 
 @app.route('/api/batch/identities', methods=['POST'])
 def batch_identities():
-    try:
-        addresses = request.json.get('addresses', [])
-        if not addresses or len(addresses) > 100:
-            return jsonify({'error': 'Invalid count (max 100)'}), 400
+    if not REPUTATION_ENABLED:
+        return jsonify(UNAVAILABLE), 503
+    addresses = (request.get_json(silent=True) or {}).get('addresses', [])
+    if not isinstance(addresses, list) or not addresses or len(addresses) > 100:
+        return jsonify({'error': 'Invalid count (max 100)'}), 400
 
-        results = []
-        for addr_str in addresses:
-            try:
-                addr = Web3.to_checksum_address(addr_str)
-                identity = compute_identity(addr)
-                results.append({'address': addr_str, **identity})
-            except Exception:
-                results.append({'address': addr_str, 'error': 'Invalid'})
-
-        return jsonify({'results': results, 'count': len(results)})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 400
+    results = []
+    for addr_str in addresses:
+        try:
+            addr = Web3.to_checksum_address(addr_str)
+            results.append({'address': addr, **compute_identity(addr)})
+        except Exception:
+            results.append({'address': addr_str, 'error': 'Invalid'})
+    return jsonify({'results': results, 'count': len(results)})
 
 @app.errorhandler(404)
 def not_found(error):
@@ -246,8 +225,7 @@ def server_error(error):
     return jsonify({'error': 'Internal server error'}), 500
 
 if __name__ == '__main__':
-    print("🚀 GFLO Flask API v2.1 — élő PIECore ABI-hoz igazítva")
+    print("🚀 GFLO Flask API v3.0 — canonical PIE v0.2 read path, legacy v3 disabled")
     print(f"🔗 Blockchain: {'✅ connected' if w3.is_connected() else '❌ disconnected'}")
-    print(f"🌐 RPC: {RPC_URL}")
+    print(f"🧬 Reputation: {'enabled' if REPUTATION_ENABLED else 'DISABLED (no canonical deployment configured)'}")
     app.run(host='0.0.0.0', port=5000, debug=False)
-
